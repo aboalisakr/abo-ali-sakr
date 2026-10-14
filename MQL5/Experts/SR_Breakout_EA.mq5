@@ -15,6 +15,12 @@
 
 #include <Trade\Trade.mqh>
 
+enum ENUM_ENTRY_MODE
+  {
+   ENTRY_BREAKOUT = 0, // Enter right after the confirmed break
+   ENTRY_RETEST   = 1  // Wait for price to retest the broken zone
+  };
+
 enum ENUM_TARGET_MODE
   {
    TARGET_FIXED_DISTANCE = 0, // Fixed distance from market price (e.g. 10$)
@@ -39,6 +45,11 @@ input group "Breakout confirmation"
 input ENUM_TIMEFRAMES  InpSignalTimeframe   = PERIOD_M15;  // Timeframe used to confirm the break
 input int              InpConfirmBars       = 2;           // Closed candles that must hold beyond the zone
 input double           InpBreakBuffer       = 0.5;         // Close must be this far beyond the zone ($)
+
+input group "Entry"
+input ENUM_ENTRY_MODE  InpEntryMode         = ENTRY_RETEST; // Entry mode
+input int              InpRetestMaxBars     = 12;          // Retest: candles to wait for the retest
+input double           InpRetestTolerance   = 0.5;         // Retest: price must come this close to the zone ($)
 
 input group "Trade settings"
 input ENUM_TARGET_MODE InpTargetMode        = TARGET_FIXED_DISTANCE; // Take-profit mode
@@ -86,6 +97,13 @@ datetime g_lastSignalBar = 0;
 datetime g_lastSRBar     = 0;
 bool     g_showVisuals   = true;
 string   g_prefix        = "SRBO_";
+
+// broken zone waiting for a retest (ENTRY_RETEST)
+bool     g_pendActive    = false;
+bool     g_pendIsBuy     = false;
+bool     g_pendTouched   = false;
+int      g_pendBars      = 0;
+SRZone   g_pendZone;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -140,7 +158,10 @@ void OnTick()
    g_lastSignalBar = barTime;
 
    DrawZones();
-   if(!IsBlockedHour())
+   bool blocked = IsBlockedHour();
+   if(InpEntryMode == ENTRY_RETEST)
+      CheckRetest(blocked);
+   if(!blocked)
       CheckBreakouts();
   }
 
@@ -303,10 +324,90 @@ void CheckBreakouts()
          bestSell = z;
      }
 
+   bool isBuy;
    if(bestBuy >= 0 && InpAllowBuy)
-      OpenTrade(true, g_zones[bestBuy]);
+      isBuy = true;
    else if(bestSell >= 0 && InpAllowSell)
-      OpenTrade(false, g_zones[bestSell]);
+      isBuy = false;
+   else
+      return;
+   int z = isBuy ? bestBuy : bestSell;
+
+   if(InpEntryMode == ENTRY_BREAKOUT)
+     {
+      OpenTrade(isBuy, g_zones[z]);
+      return;
+     }
+
+   // a new break replaces any setup still waiting for its retest
+   g_pendActive  = true;
+   g_pendIsBuy   = isBuy;
+   g_pendTouched = false;
+   g_pendBars    = 0;
+   g_pendZone    = g_zones[z];
+   PrintFormat("Break %s zone %.2f-%.2f, waiting for retest",
+               isBuy ? "above" : "below", g_pendZone.low, g_pendZone.high);
+  }
+
+//+------------------------------------------------------------------+
+//| Retest entry: after the break, wait for price to come back to    |
+//| the zone, then enter when a candle closes away from it again in  |
+//| the breakout direction. Cancelled if price closes back through   |
+//| the zone or the retest takes longer than InpRetestMaxBars.       |
+//+------------------------------------------------------------------+
+void CheckRetest(bool blocked)
+  {
+   if(!g_pendActive)
+      return;
+
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, InpSignalTimeframe, 1, 1, r) != 1)
+      return;
+
+   g_pendBars++;
+   double lo = g_pendZone.low, hi = g_pendZone.high;
+
+   if(g_pendIsBuy)
+     {
+      if(r[0].close < lo)
+        {
+         Print("Retest failed: closed back below the zone");
+         g_pendActive = false;
+         return;
+        }
+      if(r[0].low <= hi + InpRetestTolerance)
+         g_pendTouched = true;
+      if(g_pendTouched && r[0].close > hi && r[0].close > r[0].open && !blocked)
+        {
+         OpenTrade(true, g_pendZone);
+         g_pendActive = false;
+         return;
+        }
+     }
+   else
+     {
+      if(r[0].close > hi)
+        {
+         Print("Retest failed: closed back above the zone");
+         g_pendActive = false;
+         return;
+        }
+      if(r[0].high >= lo - InpRetestTolerance)
+         g_pendTouched = true;
+      if(g_pendTouched && r[0].close < lo && r[0].close < r[0].open && !blocked)
+        {
+         OpenTrade(false, g_pendZone);
+         g_pendActive = false;
+         return;
+        }
+     }
+
+   if(g_pendBars >= InpRetestMaxBars)
+     {
+      Print("Retest expired");
+      g_pendActive = false;
+     }
   }
 
 //+------------------------------------------------------------------+
