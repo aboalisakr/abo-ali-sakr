@@ -47,13 +47,22 @@ input double           InpSwingOffset       = 1.0;         // Target offset befo
 input double           InpMinTargetDistance = 3.0;         // Swing mode: minimum target distance ($)
 input bool             InpFallbackToFixed   = true;        // Swing mode: use fixed target if no swing found
 input double           InpSLBuffer          = 2.0;         // Stop loss beyond the zone ($)
-input double           InpMaxSLDistance     = 0.0;         // Skip trade if SL farther than this ($, 0 = off)
+input double           InpMaxSLDistance     = 10.0;        // Skip trade if SL farther than this ($, 0 = off)
 input double           InpMaxSpread         = 1.0;         // Maximum spread ($, 0 = off)
 input bool             InpAllowBuy          = true;        // Allow buy trades
 input bool             InpAllowSell         = true;        // Allow sell trades
 input int              InpMaxPositions      = 1;           // Maximum open positions
 input ulong            InpMagic             = 20261014;    // Magic number
 input int              InpSlippagePoints    = 30;          // Max slippage (points)
+
+input group "Breakeven"
+input double           InpBreakevenTrigger  = 5.0;         // Move SL to entry after this profit ($, 0 = off)
+input double           InpBreakevenOffset   = 0.5;         // SL placed this far past entry ($)
+
+input group "Time filter (server time)"
+input bool             InpUseTimeFilter     = true;        // Block new trades during the hours below
+input int              InpNoTradeStartHour  = 15;          // Block from this hour
+input int              InpNoTradeEndHour    = 17;          // Until this hour (not included)
 
 input group "Display"
 input bool             InpDrawZones         = true;        // Draw zones on the chart
@@ -112,6 +121,9 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   if(InpBreakevenTrigger > 0 && PositionsTotal() > 0)
+      ManageBreakeven();
+
    datetime barTime = iTime(_Symbol, InpSignalTimeframe, 0);
    if(barTime == 0 || barTime == g_lastSignalBar)
       return;
@@ -128,7 +140,61 @@ void OnTick()
    g_lastSignalBar = barTime;
 
    DrawZones();
-   CheckBreakouts();
+   if(!IsBlockedHour())
+      CheckBreakouts();
+  }
+
+//+------------------------------------------------------------------+
+//| True when new trades are not allowed at the current server hour  |
+//+------------------------------------------------------------------+
+bool IsBlockedHour()
+  {
+   if(!InpUseTimeFilter || InpNoTradeStartHour == InpNoTradeEndHour)
+      return false;
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   if(InpNoTradeStartHour < InpNoTradeEndHour)
+      return dt.hour >= InpNoTradeStartHour && dt.hour < InpNoTradeEndHour;
+   // range wraps past midnight, e.g. 22 -> 2
+   return dt.hour >= InpNoTradeStartHour || dt.hour < InpNoTradeEndHour;
+  }
+
+//+------------------------------------------------------------------+
+//| Move SL to entry +/- offset once price moved InpBreakevenTrigger |
+//+------------------------------------------------------------------+
+void ManageBreakeven()
+  {
+   MqlTick t;
+   if(!SymbolInfoTick(_Symbol, t))
+      return;
+   double minDist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         (ulong)PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl   = PositionGetDouble(POSITION_SL);
+      double tp   = PositionGetDouble(POSITION_TP);
+
+      if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+        {
+         double newSl = NormalizeDouble(open + InpBreakevenOffset, _Digits);
+         if(t.bid - open >= InpBreakevenTrigger && sl < newSl && t.bid - newSl >= minDist)
+            g_trade.PositionModify(ticket, newSl, tp);
+        }
+      else
+        {
+         double newSl = NormalizeDouble(open - InpBreakevenOffset, _Digits);
+         if(open - t.ask >= InpBreakevenTrigger && (sl == 0 || sl > newSl) && newSl - t.ask >= minDist)
+            g_trade.PositionModify(ticket, newSl, tp);
+        }
+     }
   }
 
 //+------------------------------------------------------------------+
