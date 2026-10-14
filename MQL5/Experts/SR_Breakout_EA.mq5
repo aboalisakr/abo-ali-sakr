@@ -74,6 +74,8 @@ SRZone   g_zones[];
 double   g_swingHighs[];
 double   g_swingLows[];
 datetime g_lastSignalBar = 0;
+datetime g_lastSRBar     = 0;
+bool     g_showVisuals   = true;
 string   g_prefix        = "SRBO_";
 
 //+------------------------------------------------------------------+
@@ -89,8 +91,14 @@ int OnInit()
    g_trade.SetDeviationInPoints(InpSlippagePoints);
    g_trade.SetTypeFillingBySymbol(_Symbol);
 
+   // drawing and Comment() only slow down a non-visual backtest
+   g_showVisuals = !(MQLInfoInteger(MQL_TESTER) && !MQLInfoInteger(MQL_VISUAL_MODE));
+
    if(BuildZones())
+     {
+      g_lastSRBar = iTime(_Symbol, InpSRTimeframe, 0);
       DrawZones();
+     }
    return INIT_SUCCEEDED;
   }
 
@@ -108,9 +116,15 @@ void OnTick()
    if(barTime == 0 || barTime == g_lastSignalBar)
       return;
 
-   // history for the S/R timeframe may still be loading: retry next tick
-   if(!BuildZones())
-      return;
+   // zones only change when a new S/R-timeframe bar opens
+   datetime srTime = iTime(_Symbol, InpSRTimeframe, 0);
+   if(srTime != g_lastSRBar)
+     {
+      // history for the S/R timeframe may still be loading: retry next tick
+      if(!BuildZones())
+         return;
+      g_lastSRBar = srTime;
+     }
    g_lastSignalBar = barTime;
 
    DrawZones();
@@ -363,6 +377,9 @@ int CountPositions()
 //+------------------------------------------------------------------+
 void DrawZones()
   {
+   if(!g_showVisuals)
+      return;
+
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double nearestRes = 0, nearestSup = 0;
 
